@@ -144,7 +144,10 @@ class DSQuantizedMultiGemmMoE(DSMoEBase):
 
         if len(param.shape) == 3:
             param = param.permute(0, 2, 1).contiguous()
-        weight_4bit, scales = None, None # TODO
+         # weight is [b, m, n], scales is [b, n]
+        weight_4bit = torch.rand_like(param, dtype=torch.float16)
+        scales = torch.rand((param.shape[0], param.shape[2]), dtype=torch.float16)
+        
         return InferenceParameter.initialize(param, weight_4bit=weight_4bit, scales=scales)
 
     def transform_moe_mlp_2_param(self, param: torch.Tensor) -> InferenceParameter:
@@ -161,7 +164,11 @@ class DSQuantizedMultiGemmMoE(DSMoEBase):
 
         if len(param.shape) == 3:
             param = param.permute(0, 2, 1).contiguous()
-        weight_4bit, scales = None, None # TODO
+        
+        # weight is [b, m, n], scales is [b, n]
+        weight_4bit = torch.rand_like(param, dtype=torch.float16)
+        scales = torch.rand((param.shape[0], param.shape[2]), dtype=torch.float16)
+
         return InferenceParameter.initialize(param, weight_4bit=weight_4bit, scales=scales)
 
     @property
