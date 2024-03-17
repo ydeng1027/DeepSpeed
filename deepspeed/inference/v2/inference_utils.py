@@ -48,6 +48,7 @@ ELEM_SIZES: Dict[torch.dtype, int] = {
     torch.float32: 4,
     torch.float64: 8,
     torch.int8: 1,
+    torch.quint4x2: 1,
     torch.uint8: 1,
     torch.int16: 2,
     torch.int32: 4,

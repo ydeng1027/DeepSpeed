@@ -97,8 +97,9 @@ def instantiate_linear(linear_config: DSLinearConfig, engine_config: RaggedInfer
             raise ValueError(f"Unsupported quantization mode: {quantization_mode}")
     return DSLinearRegistry.instantiate_config(config)
 
-
+index  = 1
 def instantiate_moe(moe_config: DSMoEConfig, engine_config: RaggedInferenceEngineConfig) -> DSMoEBase:
+    global index 
     """
     Choose an appropriate MoE implementation based on the given configurations. This
     method is currently a stub, but as more implementations may be developed  we can centralize
@@ -111,17 +112,25 @@ def instantiate_moe(moe_config: DSMoEConfig, engine_config: RaggedInferenceEngin
     Returns:
         A MoE module implementing the given configuration.
     """
+    index += 1  
+    print ("check on this one", index)
+    moe_type = "quantize_multi_gemm_moe" #"cutlass_multi_gemm_moe" #
 
-    moe_type = "cutlass_multi_gemm_moe"
+    # if moe_type == "quantize_multi_gemm_moe":
+    #     # TODO: Get this off an engine config
+    #     implementation_config = {
+    #         "weight_dtype": moe_config.input_dtype,
+    #     }
+    # else:
+    implementation_config = {
+        "weight_dtype": moe_config.input_dtype,
+    }      
 
-    if moe_type == "cutlass_multi_gemm_moe":
-        # TODO: Get this off an engine config
-        implementation_config = {
-            "weight_dtype": moe_config.input_dtype,
-        }
+    
 
+    
     # Currently, we only have one implementation, so we just return it.
-    config = ConfigBundle(name="cutlass_multi_gemm_moe",
+    config = ConfigBundle(name=moe_type, #"quantize_multi_gemm_moe",
                           config=moe_config,
                           implementation_config=implementation_config)
     return DSMoERegistry.instantiate_config(config)

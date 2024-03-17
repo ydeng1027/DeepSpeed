@@ -20,10 +20,65 @@ from ....ragged import RaggedBatchWrapper
 
 from ...interfaces import DSMoEBase, DSMoERegistry
 from ...configs import DSMoEConfig
-from ....kernels.cutlass_ops import MixedMoEGEMM
+from ....kernels.cutlass_ops import MoEGEMM, MixedMoEGEMM
 from ....inference_parameter import InferenceParameter
 
 
+def int_quantize(input: torch.FloatTensor,
+                num_bits: int = 8,
+                min_value: torch.FloatTensor = None,
+                max_value: torch.FloatTensor = None,
+                group_size: int = -1):
+    """
+    Args:
+        inputs (`torch.FloatTensor`)
+            The input which needs to be quantized
+        num_bits (int, >=4)
+            Number of bits to use for quantization
+        min_value/max_vlue (torch.FloatTensor)
+            Used for static activation quantization
+        group_size (int) N
+            The quantization block size, each N numbers has its own scaling
+            factor and off-site. -1 means use the last dim as the group_size
+    Returns:
+        quantized_fake_fp6
+            The quantized weights, in fp16 format and contains fp6 value.
+        scales
+            Quantization scales
+    """
+
+    q_range = 2**num_bits
+    assert (min_value is None and max_value is None) or (min_value is not None and max_value is not None)
+
+    assert input.dtype == torch.float16
+
+    orig_device = input.device
+    input = input.to(torch.float32).to(get_accelerator().current_device())
+
+    input_shape = input.shape
+
+    if group_size == -1:
+        group_size = input_shape[-1]
+    else:
+        # Only support per-channel quantization
+        raise NotImplementedError
+    num_groups = input.numel() // group_size
+    input = input.reshape(num_groups, -1)
+
+    if min_value is None:
+        #min_value = input.amin(dim=-1, keepdim=True)
+        max_value = input.amax(dim=-1, keepdim=True)
+        
+    scales = 2 * (max_value) / q_range
+    scales[scales == 0] = 1 
+    # zero_point = (min_value / scale).round() * scale   
+    #print ("check size",scales.size())
+   # print (torch.abs(((input / scales).round().clamp(-q_range // 2, q_range // 2 - 1)).reshape(input_shape)*scales-input).mean())
+    output = ((input / scales).round().clamp(-q_range // 2, q_range // 2 - 1)).reshape(input_shape).contiguous() 
+    #.to(torch.float16).to(orig_device)
+    return output, scales
+
+index = 0
 @DSMoERegistry.register_module
 class DSQuantizedMultiGemmMoE(DSMoEBase):
     """
@@ -32,7 +87,7 @@ class DSQuantizedMultiGemmMoE(DSMoEBase):
 
     @staticmethod
     def name():
-        return 'cutlass_multi_gemm_moe'
+        return 'quantize_multi_gemm_moe'
 
     @staticmethod
     def supports_config(config: DSMoEConfig) -> bool:
@@ -57,10 +112,12 @@ class DSQuantizedMultiGemmMoE(DSMoEBase):
         self.intermediate_dim = self._config.intermediate_features
 
         moe_op_act_fn = ActivationType.IDENTITY if is_gated(self._config.activation) else self._config.activation
-
-        self._mlp_1 = MixedMoEGEMM(fp_dtype=implementation_config['weight_dtype'], act_fn=moe_op_act_fn, num_bits=4)
-        self._mlp_2 = MixedMoEGEMM(fp_dtype=implementation_config['weight_dtype'], act_fn=ActivationType.IDENTITY, num_bits=4)
-
+        
+        #if index %2==0:
+        self._mlp_1 = MixedMoEGEMM(fp_dtype=implementation_config['weight_dtype'], act_fn=moe_op_act_fn, num_bits=8)
+        self._mlp_2 = MoEGEMM(fp_dtype=implementation_config['weight_dtype'], act_fn=ActivationType.IDENTITY)#, num_bits=8
+        # self._mlp_1a = MoEGEMM(fp_dtype=implementation_config['weight_dtype'], act_fn=moe_op_act_fn, num_bits=8)
+        #, num_bits=8
         if is_gated(self._config.activation):
             self._activation = CUDAGatedActivation(self._config.model_dim, self._config.input_dtype,
                                                    self._config.activation)
@@ -130,26 +187,6 @@ class DSQuantizedMultiGemmMoE(DSMoEBase):
         param = param.to(self._config.input_dtype)
         return InferenceParameter.initialize(param)
 
-    def transform_moe_mlp_1_param(self, param: torch.Tensor) -> InferenceParameter:
-        """
-        Converts param to same data type as input and output.
-
-        Parameters:
-            param (torch.Tensor): Weight or bias tensor.
-        """
-        param = param.to(self._config.input_dtype)
-        if len(param.shape) == 2:
-            # skip for bias tensor
-            return
-
-        if len(param.shape) == 3:
-            param = param.permute(0, 2, 1).contiguous()
-         # weight is [b, m, n], scales is [b, n]
-        weight_4bit = torch.rand_like(param, dtype=torch.float16)
-        scales = torch.rand((param.shape[0], param.shape[2]), dtype=torch.float16)
-        
-        return InferenceParameter.initialize(param, weight_4bit=weight_4bit, scales=scales)
-
     def transform_moe_mlp_2_param(self, param: torch.Tensor) -> InferenceParameter:
         """
         Converts param to same data type as input and output.
@@ -164,12 +201,55 @@ class DSQuantizedMultiGemmMoE(DSMoEBase):
 
         if len(param.shape) == 3:
             param = param.permute(0, 2, 1).contiguous()
+         # weight is [b, m, n], scales is [b, n]
+        #param = torch.rand_like(param,dtype=torch.quint4x2)
+        # weight_4bit = torch.quantize_per_tensor(param.to(torch.float32), scale=1.0, zero_point=0, dtype=torch.quint4x2)
+        # scales = torch.rand((param.shape[0], param.shape[2]), dtype=torch.float16)
+        # print ("check, here! moe_mlp_1", param.size())
+        return InferenceParameter.initialize(param)
+
+    def transform_moe_mlp_1_param(self, param: torch.Tensor) -> InferenceParameter:
+        """
+        Converts param to same data type as input and output.
+
+        Parameters:
+            param (torch.Tensor): Weight or bias tensor.
+        """
+        global index
+        index += 1
+        param = param.to(self._config.input_dtype)
+        if len(param.shape) == 2:
+            # skip for bias tensor
+            return
+
+        if len(param.shape) == 3:
+            param = param.permute(0, 2, 1).contiguous()
         
         # weight is [b, m, n], scales is [b, n]
-        weight_4bit = torch.rand_like(param, dtype=torch.float16)
-        scales = torch.rand((param.shape[0], param.shape[2]), dtype=torch.float16)
-
-        return InferenceParameter.initialize(param, weight_4bit=weight_4bit, scales=scales)
+        # Create a random tensor with the same shape as 'param' and data type torch.float32
+        print ("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~layer",index)
+        if index %2 ==0 and index==2:
+            weight_8bit = torch.zeros(param.shape, dtype=torch.int8)
+            scales = torch.zeros((param.shape[0], param.shape[2]), dtype=torch.float16)
+            #print (torch.mean(weight_8bit.half()), torch.norm(scales))
+            for i in range(param.size()[0]):
+                #print ("sssss", param[i].size())
+                #import pdb; pdb.set_trace()
+                int8_w, scale = int_quantize(param[i].T)
+                weight_8bit[i] = int8_w.to(torch.int8).T
+                #print (i, scale.size())
+                scales[i] = scale.flatten()
+            #import pdb; pdb.set_trace()
+            print (torch.norm(scales.unsqueeze(1)* weight_8bit - param))
+            # Quantize the random tensor to 4-bit precision
+            
+            #weight_8bit = torch.quantize_per_tensor(param.to(torch.float32), scale=1.0, zero_point=0, dtype=torch.int8)
+            #import pdb;pdb.set_trace()
+            
+            print ("check, here! moe_mlp_2", param.size())
+            return InferenceParameter.initialize(param, weight_8bit=weight_8bit, scales=scales)
+        else:
+            return InferenceParameter.initialize(param)
 
     @property
     def output(self) -> torch.Tensor:
@@ -222,7 +302,9 @@ class DSQuantizedMultiGemmMoE(DSMoEBase):
             hidden_states (torch.Tensor): Hidden states tensor. Expected shape is [batch, seq_len, model_dim].
             gate_w (torch.Tensor): Gate weight tensor. Expected shape is [num_experts, model_dim].
         """
-
+        # global index
+        # index += 1
+        # self.index += 1
         moe_input, expert_cumsum, scores, mapped_slots = self._gate(hidden_states, batch_metadata, gate_w)
 
         # Get views on the buffers for GEMM
@@ -231,36 +313,59 @@ class DSQuantizedMultiGemmMoE(DSMoEBase):
         output_unordered = empty_from(self._output_unordered,
                                       (hidden_states.shape[0] * self.n_top_k, self._output_unordered.shape[-1]))
         output = empty_from(self._output, (hidden_states.shape[0], self._output.shape[-1]))
-        scales_1 = mlp_1_w.scales
-        mlp_1_w_4bit = mlp_1_w.weight_4bit
-        if self._activation is not None:
-            gated_intermediate = empty_from(
-                self._gated_intermediate, (hidden_states.shape[0] * self.n_top_k, self._gated_intermediate.shape[-1]))
-            self._mlp_1(
-                gated_intermediate,
-                moe_input,
-                mlp_1_w_4bit,
-                scales_1,
-                expert_cumsum,
-                mlp_1_b,
-            )
-            self._activation(intermediate, gated_intermediate)
-        else:
-            self._mlp_1(
-                intermediate,
-                moe_input,
-                mlp_1_w_4bit,
-                scales_1,
-                expert_cumsum,
-                mlp_1_b,
-            )
-        scales_2 = mlp_2_w.scales
-        mlp_2_w_4bit = mlp_2_w.weight_4bit
+        #print ("check here!!!!!!!!!!!!!!!!!!!")
+        try:
+            scales_1 = mlp_1_w.scales
+            if self._activation is not None:
+                gated_intermediate = empty_from(self._gated_intermediate, (hidden_states.shape[0] * self.n_top_k, self._gated_intermediate.shape[-1]))
+                #torch.Size([54, 3584])
+                self._mlp_1(gated_intermediate, moe_input, mlp_1_w.weight_8bit, scales_1, expert_cumsum, mlp_1_b,)
+                 ###             [54, 3584]    [54, 4096]    [8, 4096, 3584]  #[8, 3584] #[ 6, 15, 24, 30, 37, 43, 48, 54] None
+                 ###torch.Size([1536, 3584])
+                tmp_int8 = gated_intermediate.clone()
+                
+                import pdb; pdb.set_trace()
+                gated_intermediate = empty_from(self._gated_intermediate, (hidden_states.shape[0] * self.n_top_k, self._gated_intermediate.shape[-1]))
+                self._mlp_2(gated_intermediate, moe_input, mlp_1_w, expert_cumsum, mlp_1_b,)
+                print ("------------------------", torch.norm(tmp_int8 - gated_intermediate))
+                self._activation(intermediate, gated_intermediate)
+            else:
+                self._mlp_1(
+                    intermediate, ###[54, 1792]
+                    moe_input,
+                    mlp_1_w,
+                    scales_1.unsqueeze(1),
+                    expert_cumsum,
+                    mlp_1_b,
+                )
+            print ("yes yes")
+        except:
+            if self._activation is not None:
+                gated_intermediate = empty_from(
+                    self._gated_intermediate, (hidden_states.shape[0] * self.n_top_k, self._gated_intermediate.shape[-1]))
+                self._mlp_2(
+                    gated_intermediate,
+                    moe_input,
+                    mlp_1_w,
+                    expert_cumsum,
+                    mlp_1_b,
+                )
+                self._activation(intermediate, gated_intermediate)
+            else:
+                self._mlp_2(
+                    intermediate,
+                    moe_input,
+                    mlp_1_w,
+                    expert_cumsum,
+                    mlp_1_b,
+                )
+            #print ("expert_cumsum nonononon")
+        #scales_2 = mlp_2_w.scales
+        
         self._mlp_2(
             output_unordered,
             intermediate,
-            mlp_2_w_4bit,
-            scales_2,
+            mlp_2_w,
             expert_cumsum,
             mlp_2_b,
         )

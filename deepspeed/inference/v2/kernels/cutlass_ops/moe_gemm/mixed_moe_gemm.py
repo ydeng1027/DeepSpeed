@@ -38,7 +38,7 @@ class MixedMoEGEMM(DSKernelBase):
 
         inf_module = InferenceCutlassBuilder().load()
         self.num_bits = num_bits
-        self.kernel = inf_module.moe_gemm
+        self.kernel = inf_module.mixed_moe_gemm
         self.act_fn = act_fn
 
     def __call__(self,
@@ -62,6 +62,8 @@ class MixedMoEGEMM(DSKernelBase):
             Returns:
                 ordered_output
             """
+        #import pdb; pdb.set_trace()
         self.kernel(ordered_output, ordered_input, weights, scales, biases, total_rows_before_expert, self.num_bits,
                     self.act_fn)
+        
         return ordered_output
