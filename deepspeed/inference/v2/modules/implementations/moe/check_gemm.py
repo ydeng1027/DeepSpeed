@@ -76,8 +76,12 @@ for i in range(num_experts):
     weight_int8[i] = int8_w.to(torch.int8).T
     scales[i]  = int8_s.flatten()
 
-# symmetric_quantizer = torch.ops.fastertransformer._symmetric_quantize_last_axis_of_batched_matrix
-# ref_torch_weights_fc1, act_torch_weights_fc1, torch_weight_scales_fc1 = symmetric_quantizer(weights["fc1_expert_weights_for_ft"].cpu(), quant_type)
+import tensorrt_llm
+symmetric_quantizer = torch.ops.trtllm.symmetric_quantize_last_axis_of_batched_matrix
+act_torch_weights_fc1, torch_weight_scales_fc1 = symmetric_quantizer(weight.cpu(), torch.int8)
+print(torch_weight_scales_fc1)
+
+#import pdb;pdb.set_trace()
 print ("quantization error", torch.norm(weight-torch.multiply(weight_int8, scales.unsqueeze(1))))
 print ("quantization error", torch.norm(weight-weight_int8*scales.unsqueeze(1)))
 bias = torch.randn(num_experts, output_size, dtype=torch.float16, device='cuda')
@@ -95,7 +99,7 @@ output2 = torch.empty(sqeuence, output_size, dtype=torch.float16, device='cuda')
 mlp_2(output2, hidden_states, weight_int8*scales.unsqueeze(1), total_rows_before_expert, None)
 
 output1 = torch.empty(sqeuence, output_size, dtype=torch.float16, device='cuda')
-mlp_1(output1, hidden_states, weight_int8, scales, total_rows_before_expert,None)
+mlp_1(output1, hidden_states, act_torch_weights_fc1.cuda(), torch_weight_scales_fc1.cuda(), total_rows_before_expert,None)
 
 index = 0
 for x,y,z in zip(output1, output2, output3):
