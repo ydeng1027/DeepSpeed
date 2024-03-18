@@ -22,61 +22,61 @@ from ...interfaces import DSMoEBase, DSMoERegistry
 from ...configs import DSMoEConfig
 from ....kernels.cutlass_ops import MoEGEMM, MixedMoEGEMM
 from ....inference_parameter import InferenceParameter
+import tensorrt_llm 
 
+# def int_quantize(input: torch.FloatTensor,
+#                 num_bits: int = 8,
+#                 min_value: torch.FloatTensor = None,
+#                 max_value: torch.FloatTensor = None,
+#                 group_size: int = -1):
+#     """
+#     Args:
+#         inputs (`torch.FloatTensor`)
+#             The input which needs to be quantized
+#         num_bits (int, >=4)
+#             Number of bits to use for quantization
+#         min_value/max_vlue (torch.FloatTensor)
+#             Used for static activation quantization
+#         group_size (int) N
+#             The quantization block size, each N numbers has its own scaling
+#             factor and off-site. -1 means use the last dim as the group_size
+#     Returns:
+#         quantized_fake_fp6
+#             The quantized weights, in fp16 format and contains fp6 value.
+#         scales
+#             Quantization scales
+#     """
 
-def int_quantize(input: torch.FloatTensor,
-                num_bits: int = 8,
-                min_value: torch.FloatTensor = None,
-                max_value: torch.FloatTensor = None,
-                group_size: int = -1):
-    """
-    Args:
-        inputs (`torch.FloatTensor`)
-            The input which needs to be quantized
-        num_bits (int, >=4)
-            Number of bits to use for quantization
-        min_value/max_vlue (torch.FloatTensor)
-            Used for static activation quantization
-        group_size (int) N
-            The quantization block size, each N numbers has its own scaling
-            factor and off-site. -1 means use the last dim as the group_size
-    Returns:
-        quantized_fake_fp6
-            The quantized weights, in fp16 format and contains fp6 value.
-        scales
-            Quantization scales
-    """
+#     q_range = 2**num_bits
+#     assert (min_value is None and max_value is None) or (min_value is not None and max_value is not None)
 
-    q_range = 2**num_bits
-    assert (min_value is None and max_value is None) or (min_value is not None and max_value is not None)
+#     assert input.dtype == torch.float16
 
-    assert input.dtype == torch.float16
+#     orig_device = input.device
+#     input = input.to(torch.float32).to(get_accelerator().current_device())
 
-    orig_device = input.device
-    input = input.to(torch.float32).to(get_accelerator().current_device())
+#     input_shape = input.shape
 
-    input_shape = input.shape
+#     if group_size == -1:
+#         group_size = input_shape[-1]
+#     else:
+#         # Only support per-channel quantization
+#         raise NotImplementedError
+#     num_groups = input.numel() // group_size
+#     input = input.reshape(num_groups, -1)
 
-    if group_size == -1:
-        group_size = input_shape[-1]
-    else:
-        # Only support per-channel quantization
-        raise NotImplementedError
-    num_groups = input.numel() // group_size
-    input = input.reshape(num_groups, -1)
-
-    if min_value is None:
-        #min_value = input.amin(dim=-1, keepdim=True)
-        max_value = input.amax(dim=-1, keepdim=True)
+#     if min_value is None:
+#         #min_value = input.amin(dim=-1, keepdim=True)
+#         max_value = input.amax(dim=-1, keepdim=True)
         
-    scales = 2 * (max_value) / q_range
-    scales[scales == 0] = 1 
-    # zero_point = (min_value / scale).round() * scale   
-    #print ("check size",scales.size())
-   # print (torch.abs(((input / scales).round().clamp(-q_range // 2, q_range // 2 - 1)).reshape(input_shape)*scales-input).mean())
-    output = ((input / scales).round().clamp(-q_range // 2, q_range // 2 - 1)).reshape(input_shape).contiguous() 
-    #.to(torch.float16).to(orig_device)
-    return output, scales
+#     scales = 2 * (max_value) / q_range
+#     scales[scales == 0] = 1 
+#     # zero_point = (min_value / scale).round() * scale   
+#     #print ("check size",scales.size())
+#    # print (torch.abs(((input / scales).round().clamp(-q_range // 2, q_range // 2 - 1)).reshape(input_shape)*scales-input).mean())
+#     output = ((input / scales).round().clamp(-q_range // 2, q_range // 2 - 1)).reshape(input_shape).contiguous() 
+#     #.to(torch.float16).to(orig_device)
+#     return output, scales
 
 index = 0
 @DSMoERegistry.register_module
@@ -228,26 +228,31 @@ class DSQuantizedMultiGemmMoE(DSMoEBase):
         # weight is [b, m, n], scales is [b, n]
         # Create a random tensor with the same shape as 'param' and data type torch.float32
         print ("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~layer",index)
-        if index %2 ==0 and index==2:
-            weight_8bit = torch.zeros(param.shape, dtype=torch.int8)
-            scales = torch.zeros((param.shape[0], param.shape[2]), dtype=torch.float16)
-            #print (torch.mean(weight_8bit.half()), torch.norm(scales))
-            for i in range(param.size()[0]):
-                #print ("sssss", param[i].size())
-                #import pdb; pdb.set_trace()
-                int8_w, scale = int_quantize(param[i].T)
-                weight_8bit[i] = int8_w.to(torch.int8).T
-                #print (i, scale.size())
-                scales[i] = scale.flatten()
-            #import pdb; pdb.set_trace()
-            print (torch.norm(scales.unsqueeze(1)* weight_8bit - param))
+        if index>0:
+            # weight_8bit = torch.zeros(param.shape, dtype=torch.int8)
+            # scales = torch.zeros((param.shape[0], param.shape[2]), dtype=torch.float16)
+            # #print (torch.mean(weight_8bit.half()), torch.norm(scales))
+            # for i in range(param.size()[0]):
+            #     #print ("sssss", param[i].size())
+            #     #import pdb; pdb.set_trace()
+            #     int8_w, scale = int_quantize(param[i].T)
+            #     weight_8bit[i] = int8_w.to(torch.int8).T
+            #     #print (i, scale.size())
+            #     scales[i] = scale.flatten()
+            # #import pdb; pdb.set_trace()
+            # print (torch.norm(scales.unsqueeze(1)* weight_8bit - param))
             # Quantize the random tensor to 4-bit precision
             
+            import tensorrt_llm
+            symmetric_quantizer = torch.ops.trtllm.symmetric_quantize_last_axis_of_batched_matrix
+            weight_8bit, scales = symmetric_quantizer(param.cpu(), torch.int8)
+            #print(torch_weight_scales_fc1)
+            
             #weight_8bit = torch.quantize_per_tensor(param.to(torch.float32), scale=1.0, zero_point=0, dtype=torch.int8)
-            #import pdb;pdb.set_trace()
+            # import pdb;pdb.set_trace()
             
             print ("check, here! moe_mlp_2", param.size())
-            return InferenceParameter.initialize(param, weight_8bit=weight_8bit, scales=scales)
+            return InferenceParameter.initialize(weight_8bit, scales=scales)
         else:
             return InferenceParameter.initialize(param)
 
@@ -319,15 +324,15 @@ class DSQuantizedMultiGemmMoE(DSMoEBase):
             if self._activation is not None:
                 gated_intermediate = empty_from(self._gated_intermediate, (hidden_states.shape[0] * self.n_top_k, self._gated_intermediate.shape[-1]))
                 #torch.Size([54, 3584])
-                self._mlp_1(gated_intermediate, moe_input, mlp_1_w.weight_8bit, scales_1, expert_cumsum, mlp_1_b,)
+                self._mlp_1(gated_intermediate, moe_input, mlp_1_w, scales_1, expert_cumsum, mlp_1_b,)
                  ###             [54, 3584]    [54, 4096]    [8, 4096, 3584]  #[8, 3584] #[ 6, 15, 24, 30, 37, 43, 48, 54] None
                  ###torch.Size([1536, 3584])
-                tmp_int8 = gated_intermediate.clone()
+                #tmp_int8 = gated_intermediate.clone()
                 
-                import pdb; pdb.set_trace()
-                gated_intermediate = empty_from(self._gated_intermediate, (hidden_states.shape[0] * self.n_top_k, self._gated_intermediate.shape[-1]))
-                self._mlp_2(gated_intermediate, moe_input, mlp_1_w, expert_cumsum, mlp_1_b,)
-                print ("------------------------", torch.norm(tmp_int8 - gated_intermediate))
+                #import pdb; pdb.set_trace()
+                #gated_intermediate = empty_from(self._gated_intermediate, (hidden_states.shape[0] * self.n_top_k, self._gated_intermediate.shape[-1]))
+                #self._mlp_2(gated_intermediate, moe_input, mlp_1_w, expert_cumsum, mlp_1_b,)
+                #print ("------------------------", torch.norm(tmp_int8 - gated_intermediate))
                 self._activation(intermediate, gated_intermediate)
             else:
                 self._mlp_1(
