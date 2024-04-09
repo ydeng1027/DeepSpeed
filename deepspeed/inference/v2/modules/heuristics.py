@@ -87,14 +87,11 @@ def instantiate_linear(linear_config: DSLinearConfig, engine_config: RaggedInfer
     """
 
     quantization_mode = engine_config.quantization.quantization_mode
-    if quantization_mode is None:
-        config = ConfigBundle(name="blas_fp_linear", config=linear_config)
+    # Currently, we only support ``quantized_wf6af16_linear``.
+    if "dense_wf6af16" in quantization_mode:
+        config = ConfigBundle(name="quantized_wf6af16_linear", config=linear_config)
     else:
-        # Currently, we only support ``quantized_wf6af16_linear``.
-        if quantization_mode == "wf6af16":
-            config = ConfigBundle(name="quantized_wf6af16_linear", config=linear_config)
-        else:
-            raise ValueError(f"Unsupported quantization mode: {quantization_mode}")
+        config = ConfigBundle(name="blas_fp_linear", config=linear_config)
     return DSLinearRegistry.instantiate_config(config)
 
 index  = 1
@@ -114,26 +111,42 @@ def instantiate_moe(moe_config: DSMoEConfig, engine_config: RaggedInferenceEngin
     """
     index += 1  
     print ("check on this one", index)
-    moe_type = "quantize_multi_gemm_moe" #"cutlass_multi_gemm_moe" #
-
-    # if moe_type == "quantize_multi_gemm_moe":
-    #     # TODO: Get this off an engine config
-    #     implementation_config = {
-    #         "weight_dtype": moe_config.input_dtype,
-    #     }
-    # else:
+    
     implementation_config = {
         "weight_dtype": moe_config.input_dtype,
     }      
+    quantization_mode = engine_config.quantization.quantization_mode
+    if quantization_mode is None:
+        # Currently, we only have one implementation, so we just return it.
+        config = ConfigBundle(name="cutlass_multi_gemm_moe",
+                            config=moe_config,
+                            implementation_config=implementation_config)
+        return DSMoERegistry.instantiate_config(config)
+    else:
+        # Currently, we only support ``quantized_wf6af16_linear``.
+        if "expert_wf8af16" in quantization_mode:
+            config = ConfigBundle(name="quantize_multi_gemm_moe", 
+                                  config=moe_config,
+                            implementation_config=implementation_config)
+            return DSMoERegistry.instantiate_config(config)
+        elif "expert_wf4af16" in quantization_mode:
+            config = ConfigBundle(name="int4_multi_gemm_moe", 
+                                  config=moe_config,
+                            implementation_config=implementation_config)
+            return DSMoERegistry.instantiate_config(config)
+        elif "expert_wf48af16" in  quantization_mode:
+            config = ConfigBundle(name="int4_8_multi_gemm_moe", 
+                                  config=moe_config,
+                            implementation_config=implementation_config)
+            return DSMoERegistry.instantiate_config(config)
+        else:
+            raise ValueError(f"Unsupported quantization mode: {quantization_mode}")
 
+    # # Currently, we only have one implementation, so we just return it.
+    # config = ConfigBundle(name=moe_type, #"quantize_multi_gemm_moe",
+    #                       config=moe_config,
+    #                       implementation_config=implementation_config)
     
-
-    
-    # Currently, we only have one implementation, so we just return it.
-    config = ConfigBundle(name=moe_type, #"quantize_multi_gemm_moe",
-                          config=moe_config,
-                          implementation_config=implementation_config)
-    return DSMoERegistry.instantiate_config(config)
 
 
 def instantiate_post_norm(norm_config: DSNormConfig, engine_config: RaggedInferenceEngineConfig) -> DSPostNormBase:

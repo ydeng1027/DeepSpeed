@@ -80,14 +80,14 @@ import tensorrt_llm
 
 index = 0
 @DSMoERegistry.register_module
-class DSQuantizedMultiGemmMoE(DSMoEBase):
+class DSINTmixedMultiGemmMoE(DSMoEBase):
     """
     MoE implementation based on the CUTLASS multi-GEMM.
     """
 
     @staticmethod
     def name():
-        return 'quantize_multi_gemm_moe'
+        return 'int4_8_multi_gemm_moe'
 
     @staticmethod
     def supports_config(config: DSMoEConfig) -> bool:
@@ -114,7 +114,7 @@ class DSQuantizedMultiGemmMoE(DSMoEBase):
         moe_op_act_fn = ActivationType.IDENTITY if is_gated(self._config.activation) else self._config.activation
         
         #if index %2==0:
-        self._mlp_1 = MixedMoEGEMM(fp_dtype=implementation_config['weight_dtype'], act_fn=moe_op_act_fn, num_bits=8)
+        self._mlp_1 = MixedMoEGEMM(fp_dtype=implementation_config['weight_dtype'], act_fn=moe_op_act_fn, num_bits=4)
         self._mlp_2 = MixedMoEGEMM(fp_dtype=implementation_config['weight_dtype'], act_fn=ActivationType.IDENTITY, num_bits=8)
         # self._mlp_1a = MoEGEMM(fp_dtype=implementation_config['weight_dtype'], act_fn=moe_op_act_fn, num_bits=8)
         #, num_bits=8
@@ -194,6 +194,7 @@ class DSQuantizedMultiGemmMoE(DSMoEBase):
         Parameters:
             param (torch.Tensor): Weight or bias tensor.
         """
+
         param = param.to(self._config.input_dtype)
         if len(param.shape) == 2:
             # skip for bias tensor
@@ -207,7 +208,10 @@ class DSQuantizedMultiGemmMoE(DSMoEBase):
         # scales = torch.rand((param.shape[0], param.shape[2]), dtype=torch.float16)
         # print ("check, here! moe_mlp_1", param.size())         
         symmetric_quantizer = torch.ops.trtllm.symmetric_quantize_last_axis_of_batched_matrix
-        weight_8bit, scales = symmetric_quantizer(param.cpu(), torch.int8)
+        #weight_8bit, scales = symmetric_quantizer(param.cpu(), torch.int8)
+        weight_8bit, scales = symmetric_quantizer(param.cpu().contiguous(), torch.int8)
+        print ("MLP2", weight_8bit.size(),scales.size()) 
+        #MLP2 torch.Size([8, 14336, 4096]) torch.Size([8, 4096])
         return  InferenceParameter.initialize(weight_8bit, scales=scales)
 
     def transform_moe_mlp_1_param(self, param: torch.Tensor) -> InferenceParameter:
@@ -228,10 +232,15 @@ class DSQuantizedMultiGemmMoE(DSMoEBase):
             param = param.permute(0, 2, 1).contiguous()
         # weight is [b, m, n], scales is [b, n]
         # Create a random tensor with the same shape as 'param' and data type torch.float32
-        print ("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~layer",index)
+        print ("INT4~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~layer",index)
+        # symmetric_quantizer = torch.ops.trtllm.symmetric_quantize_last_axis_of_batched_matrix
+        # weight_8bit, scales = symmetric_quantizer(param.cpu(), torch.int8)
         symmetric_quantizer = torch.ops.trtllm.symmetric_quantize_last_axis_of_batched_matrix
-        weight_8bit, scales = symmetric_quantizer(param.cpu(), torch.int8)
-        return InferenceParameter.initialize(weight_8bit, scales=scales)
+        #weight_8bit, scales = symmetric_quantizer(param.cpu(), torch.int8)
+        weight_4bit, scales = symmetric_quantizer(param.cpu().contiguous(), torch.quint4x2)   
+        print ("MLP1", weight_4bit.size(),scales.size())    
+        ##MLP1 torch.Size([8, 4096, 14336]) torch.Size([8, 28672]) 
+        return InferenceParameter.initialize(weight_4bit, scales=scales)
 
 
     @property
@@ -296,6 +305,7 @@ class DSQuantizedMultiGemmMoE(DSMoEBase):
         output_unordered = empty_from(self._output_unordered,
                                       (hidden_states.shape[0] * self.n_top_k, self._output_unordered.shape[-1]))
         output = empty_from(self._output, (hidden_states.shape[0], self._output.shape[-1]))
+        #import pdb;pdb.set_trace()
         if self._activation is not None:
             gated_intermediate = empty_from(self._gated_intermediate, (hidden_states.shape[0] * self.n_top_k, self._gated_intermediate.shape[-1]))
             self._mlp_1(gated_intermediate, moe_input, mlp_1_w, mlp_1_w.scales, expert_cumsum, mlp_1_b,)
@@ -309,13 +319,7 @@ class DSQuantizedMultiGemmMoE(DSMoEBase):
                 mlp_1_w.scales,
                 expert_cumsum,
                 mlp_1_b)
-        self._mlp_2(
-            output_unordered,
-            intermediate,
-            mlp_2_w,
-            mlp_2_w.scales,
-            expert_cumsum,
-            mlp_2_b,)
+        self._mlp_2(output_unordered, intermediate, mlp_2_w, mlp_2_w.scales, expert_cumsum, mlp_2_b,)
 
         self._moe_gather(output, output_unordered, scores, mapped_slots, self._expert_counts)
         return output

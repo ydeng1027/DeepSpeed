@@ -105,16 +105,25 @@ class HuggingFaceCheckpointEngine(CheckpointEngineBase):
         """
         Generator of model parameters (satisfies the CheckpointEngineBase interface).
         """
+        count1 = 0
+        count2 = 0
         for checkpoint in self._all_ckpt_paths:
             inference_logger().info(f"Loading checkpoint: {checkpoint}")
             checkpoint_sd = self._checkpoint_load_fn(checkpoint)
             param_keys = list(checkpoint_sd.keys())
+            
             for param_name in param_keys:
                 param = checkpoint_sd[param_name]
+                #print (param_name, param.shape)
+                if len(param.size())==3:
+                    count1 += param.size()[0]*param.size()[1]*param.size()[2]
+                elif len(param.size())==2:
+                    count2 += param.size()[0]*param.size()[1]
+                print (param_name, param.size())
                 yield param_name, param
 
             del checkpoint_sd
-
+        print ("FINISHE!!!!!!!!!!!!!!",{count1}, {count2})
 
 if __name__ == "__main__":
     # To test, add your auth_token here and run `python huggingface_engine.py`
